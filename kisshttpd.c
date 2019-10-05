@@ -42,7 +42,7 @@ listenOnServer(struct Server* server)
 			}
 
 			connection->fd = connectionFd;
-			connection->addr = *(struct sockaddr*)&clientAddress;
+			connection->addr = clientAddress;
 			connection->callback = server->callback;
 			connection->userdata = server->userdata;
 

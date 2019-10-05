@@ -25,7 +25,7 @@ respondToConnection(struct Connection* connection)
 	bool noBody;
 	bool acceptsGzip;
 	
-	if (parseRequest(stream, *(struct sockaddr_in6*)&connection->addr, &request, &noBody, &acceptsGzip) < 0) {
+	if (parseRequest(stream, connection->addr, &request, &noBody, &acceptsGzip) < 0) {
 		fclose(stream);
 		free(connection);
 		return -1;

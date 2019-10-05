@@ -10,7 +10,7 @@ struct
 Connection
 {
 	int fd;
-	struct sockaddr addr;
+	struct sockaddr_in6 addr;
 	struct Response (*callback)(struct Request, void* userdata);
 	void* userdata;
 };
