@@ -28,7 +28,11 @@ and install it to your system:
 
 To use it in a project, add this to the linker command:
 
-	-lkisshttpd -pthread -lz
+	-lkisshttpd
+
+And if linking statically include:
+
+	-pthread -lz
 
 ## How To Use
 

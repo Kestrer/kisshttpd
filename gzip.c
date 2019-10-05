@@ -4,7 +4,7 @@
 #include <zlib.h>
 
 unsigned char*
-gzip(unsigned char const* data, size_t length, size_t* gzLen)
+gzip(unsigned char const* const data, size_t const length, size_t* const gzLen)
 {
 	z_stream stream = {.next_in = (unsigned char*)data, .zalloc = Z_NULL, .zfree = Z_NULL, .opaque = Z_NULL};
 
@@ -19,8 +19,8 @@ gzip(unsigned char const* data, size_t length, size_t* gzLen)
 	}
 
 	size_t const bufLen = deflateBound(&stream, length);
-	unsigned char* buf = malloc(bufLen);
-	if (!buf) {
+	unsigned char* const buf = malloc(bufLen);
+	if (buf == NULL) {
 		deflateEnd(&stream);
 		return NULL;
 	}

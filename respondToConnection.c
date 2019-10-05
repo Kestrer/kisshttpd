@@ -21,7 +21,7 @@ respondToConnection(struct Connection* connection)
 	struct Response (*callback)(struct Request, void* userdata) = connection->callback;
 	void* userdata = connection->userdata;
 
-	struct Request request = {};
+	struct Request request;
 	bool noBody;
 	bool acceptsGzip;
 	

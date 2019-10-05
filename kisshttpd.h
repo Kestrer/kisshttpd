@@ -25,9 +25,9 @@ enum Method {HTTP_GET, HTTP_POST, HTTP_PUT, HTTP_DELETE};
 
 struct Request
 {
-	char sender[INET6_ADDRSTRLEN]; // IP address of the sender
+	char sender[INET6_ADDRSTRLEN]; // IPv6 address of the sender
 	enum Method method;
-	char* path; // Includes query if there is one
+	char* path; // Includes host, and query if there is one
 	struct Body body;
 };
 

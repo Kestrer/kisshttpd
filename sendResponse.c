@@ -13,7 +13,7 @@ sendResponse(FILE* connection, struct Response response, bool const noBody, bool
 
 	fprintf(connection, "%i \r\n", response.code);
 
-	if (response.uri) {
+	if (response.uri != NULL) {
 		fprintf(connection, "Location: %s\r\n", response.uri);
 	}
 
@@ -25,7 +25,7 @@ sendResponse(FILE* connection, struct Response response, bool const noBody, bool
 	if (!noBody && response.body.len && acceptsGzip) {
 		size_t gzLen;
 		unsigned char* gzData = gzip(response.body.data, response.body.len, &gzLen);
-		if (gzData) {
+		if (gzData != NULL) {
 			if (gzLen < response.body.len) {
 				gzipped = true;
 				response.body.data = gzData;

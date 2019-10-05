@@ -35,7 +35,7 @@ listenOnServer(struct Server* server)
 				break;
 			}
 			struct Connection* connection = malloc(sizeof(struct Connection));
-			if (!connection) {
+			if (connection == NULL) {
 				close(connectionFd);
 				perror("malloc connection struct failed");
 				continue;
@@ -66,7 +66,7 @@ struct Server*
 makeServer(struct Response (*callback)(struct Request, void* userdata), void* userdata, uint16_t port)
 {
 	struct Server* server = malloc(sizeof(struct Server));
-	if (!server) {
+	if (server == NULL) {
 		return NULL;
 	}
 

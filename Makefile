@@ -1,37 +1,79 @@
-CC=clang
+# c.mk 1.0
 
-all: objects/respondToConnection.o objects/gzip.o objects/sendResponse.o objects/kisshttpd.o objects/parseRequest.o libkisshttpd.a
+CC::=clang
+CFLAGS::=-Wall -Wextra -pedantic -Werror -g -Og
+LIBS::=-pthread -lz
+LDFLAGS::=-rdynamic -Wl,-rpath=/usr/local/lib -L/usr/local/lib
 
-clean: uninstall
-	-@rm objects/* libkisshttpd.a
+PREFIX::=/usr/local
 
-objects/respondToConnection.o:  respondToConnection.c respondToConnection.h kisshttpd.h kisshttpd_internal.h sendResponse.h
-	-@mkdir -p objects
-	$(CC) -c $< -o $@ -Wall -Wextra -Werror -g -Og
+SRCEXT::=c
+OBJEXT::=o
+DEPEXT::=dep
 
-objects/gzip.o:  gzip.c gzip.h
-	-@mkdir -p objects
-	$(CC) -c $< -o $@ -Wall -Wextra -Werror -g -Og
+HASMAINREGEX::='int\s+main\s*\('
+NOMAIN::=${shell pcre2grep -Mr $(HASMAINREGEX) . >/dev/null 2>&1; echo $$?}
 
-objects/sendResponse.o:  sendResponse.c sendResponse.h kisshttpd.h gzip.h kisshttpd_internal.h
-	-@mkdir -p objects
-	$(CC) -c $< -o $@ -Wall -Wextra -Werror -g -Og
+DEPDIR::=deps
+OBJDIR::=objects
 
-objects/kisshttpd.o:  kisshttpd.c kisshttpd.h respondToConnection.h
-	-@mkdir -p objects
-	$(CC) -c $< -o $@ -Wall -Wextra -Werror -g -Og
+SOURCES::=$(shell find . -name '*.$(SRCEXT)' -printf '%f\n')
+ifeq ($(NOMAIN), 1)
+PICDIR::=picobjects
+BASENAME::=$(shell basename $$(pwd))
+TARGET::=lib$(BASENAME).a
+SOTARGET::=lib$(BASENAME).so
+PREFIXTARGET::=$(PREFIX)/lib/$(TARGET)
+PREFIXSOTARGET::=$(PREFIX)/lib/$(SOTARGET)
+ifneq ("$(wildcard $(BASENAME).h)","")
+INCLUDE::=$(BASENAME).h
+PREFIXINCLUDE::=$(PREFIX)/include/$(INCLUDE)
+endif
+else
+TARGET::=$(shell basename $$(pwd))
+PREFIXTARGET::=$(PREFIX)/bin/$(TARGET)
+endif
 
-objects/parseRequest.o:  parseRequest.c parseRequest.h kisshttpd.h
-	-@mkdir -p objects
-	$(CC) -c $< -o $@ -Wall -Wextra -Werror -g -Og
+all: $(TARGET) $(or $(SOTARGET))
 
-libkisshttpd.a: objects/sendResponse.o objects/respondToConnection.o objects/kisshttpd.o objects/gzip.o objects/parseRequest.o
+clean:
+	rm -r $(TARGET) $(or $(SOTARGET)) $(OBJDIR) $(DEPDIR) $(or $(PICDIR))
+
+install: all
+	install -CD $(TARGET) $(PREFIXTARGET)
+ifeq ($(NOMAIN), 1)
+	install -CD $(SOTARGET) $(PREFIXSOTARGET)
+endif
+ifneq ($(INCLUDE),)
+	install -CD $(INCLUDE) $(PREFIXINCLUDE)
+endif
+
+uninstall:
+	rm $(PREFIXTARGET) $(or $(PREFIXSOTARGET)) $(or $(PREFIXINCLUDE))
+
+$(SOURCES:%.$(SRCEXT)=$(DEPDIR)/%.$(DEPEXT)): $(DEPDIR)/%.$(DEPEXT): %.$(SRCEXT)
+	@mkdir -p $(DEPDIR)
+	echo "$(OBJDIR)/$$($(CC) -M $< $(CFLAGS))" | perl -pe 's/([^ ]+) *:/$$1 $(subst /,\/,$@):/' > $@
+
+include $(SOURCES:%.$(SRCEXT)=$(DEPDIR)/%.$(DEPEXT))
+
+$(SOURCES:%.$(SRCEXT)=$(OBJDIR)/%.$(OBJEXT)): $(OBJDIR)/%.$(OBJEXT): %.$(SRCEXT) $(DEPDIR)/%.$(DEPEXT)
+	@mkdir -p $(OBJDIR)
+	$(CC) -c $< -o $@ $(CFLAGS)
+
+ifeq ($(NOMAIN), 1)
+$(SOURCES:%.$(SRCEXT)=$(PICDIR)/%.$(OBJEXT)): $(PICDIR)/%.$(OBJEXT): %.$(SRCEXT) $(DEPDIR)/%.$(DEPEXT)
+	@mkdir -p $(PICDIR)
+	$(CC) -c $< -o $@ $(CFLAGS) -fPIC
+
+$(TARGET): $(SOURCES:%.$(SRCEXT)=$(OBJDIR)/%.$(OBJEXT))
 	ar rcs $@ $^
 
-install:
-	cp libkisshttpd.a /usr/local/lib/
-	cp kisshttpd.h /usr/local/include/
-uninstall:
-	-@rm /usr/local/lib/libkisshttpd.a /usr/local/include/kisshttpd.h
+$(SOTARGET): $(SOURCES:%.$(SRCEXT)=$(PICDIR)/%.$(OBJEXT))
+	$(CC) -o $@ $^ $(LDFLAGS) $(LIBS) -shared
+else
+$(TARGET): $(SOURCES:%.$(SRCEXT)=$(OBJDIR)/%.$(OBJEXT))
+	$(CC) -o $@ $^ $(LDFLAGS) $(LIBS)
+endif
 
 .PHONY: all clean install uninstall
