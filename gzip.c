@@ -26,9 +26,9 @@ gzip(unsigned char const* const data, size_t const length, size_t* const gzLen)
 	}
 
 	stream.next_in = (unsigned char*)data;
-	stream.avail_in = length;
+	stream.avail_in = (uInt)length;
 	stream.next_out = buf;
-	stream.avail_out = bufLen;
+	stream.avail_out = (uInt)bufLen;
 
 	if (deflate(&stream, Z_FINISH) != Z_STREAM_END) {
 		deflateEnd(&stream);

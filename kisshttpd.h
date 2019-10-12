@@ -27,7 +27,8 @@ struct Request
 {
 	char sender[INET6_ADDRSTRLEN]; // IPv6 address of the sender
 	enum Method method;
-	char* path; // Includes host, and query if there is one
+	char* host; // Host where the request was made to, or NULL
+	char* path; // Includes path and query if there is one
 	struct Body body;
 };
 

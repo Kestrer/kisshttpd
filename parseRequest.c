@@ -32,7 +32,7 @@ serverLog(struct Request request, struct Response response)
 	char isoTime[MAXTIME];
 	getIsoTime(isoTime);
 
-	printf("[%s][%s][\"%s %s", isoTime, request.sender, methodTable[request.method], request.path);
+	printf("[%s][%s][\"%s %s%s", isoTime, request.sender, methodTable[request.method], request.host, request.path);
 	printf("\"->%d %s ", response.code, mimeTable[response.body.type]);
 	if (response.body.len != SIZE_MAX)
 		printf("<%zuB>", response.body.len);
@@ -63,7 +63,7 @@ strtozu(char const* str)
 		if (!isdigit(*str))
 			return SIZE_MAX;
 		val *= 10;
-		val += *str - '0';
+		val += (size_t)(*str - '0');
 		++str;
 	}
 	return val;
@@ -75,14 +75,11 @@ parseMethod(FILE* connection, enum Method* method, bool* noBody)
 	char methodStr[sizeof("OPTIONS")];
 	size_t i = 0;
 	for (int c; i < sizeof(methodStr)-1 && (c = fgetc(connection)) != ' '; ++i) {
-		if (c == EOF) {
-			return -1;
-		}
-		methodStr[i] = c;
+		if (c == EOF) return -1;
+		methodStr[i] = (char)c;
 	}
-	if (i == sizeof(methodStr)-1) {
-		return -1;
-	}
+	if (i == sizeof(methodStr)-1) return -1;
+
 	methodStr[i] = '\0';
 	*noBody = false;
 	if (!strcmp(methodStr, "GET")) {
@@ -104,9 +101,10 @@ parseMethod(FILE* connection, enum Method* method, bool* noBody)
 }
 
 static int
-parsePath(FILE* connection, bool noBody, char** path)
+parsePath(FILE* connection, bool noBody, char** path, char** host)
 {
 	*path = NULL;
+	*host = NULL;
 	size_t pathLen;
 	if (getdelim(path, &pathLen, ' ', connection) < 0) {
 		free(*path);
@@ -117,6 +115,34 @@ parsePath(FILE* connection, bool noBody, char** path)
 	}
 	pathLen = strlen(*path)-1;
 	(*path)[pathLen] = '\0';
+
+	if ((*path)[0] != '/') {
+		// deal with absolute-form in request-target
+		// see RFC 7230 section 5.3.2
+		for (size_t i = 0; (*path)[i] && (*path)[i] != ':'; ++i) {
+			(*path)[i] = (char)tolower((*path)[i]);
+		}
+		if (strncmp(*path, "http://", 7)) {
+			errorSend(connection, (struct Response){.code = 400, .body = {SIZE_MAX, Body_Plain, (unsigned char*)"Bad request."}, .info = "Bad request at line " STRINGIFY(__LINE__)}, noBody, false);
+			free(*path);
+			return -1;
+		}
+		char const* const hostEnd = strchr(*path + 7, '/');
+		size_t const hostLen = hostEnd != NULL ? (size_t)(hostEnd - *path) : strlen(*path);
+
+		*host = malloc(hostLen + 1);
+		if (*host == NULL) {
+			free(*path);
+			return -1;
+		}
+		memcpy(*host, *path, hostLen);
+		*host[hostLen] = '\0';
+		memmove(*path, *path + hostLen, strlen(*path + hostLen) + 1);
+		if (hostEnd == NULL) {
+			(*path)[0] = '/';
+			(*path)[1] = '\0';
+		}
+	}
 	return 0;
 }
 
@@ -139,7 +165,7 @@ parseVersion(FILE* connection, bool noBody)
 }
 
 static int
-parseHeaders(FILE* connection, bool noBody, size_t* contentLength, enum BodyType* contentType, bool* acceptsGzip)
+parseHeaders(FILE* connection, bool noBody, size_t* contentLength, enum BodyType* contentType, char** host, bool* acceptsGzip)
 {
 	*contentLength = 0;
 	*contentType = Body_Unknown;
@@ -170,7 +196,7 @@ parseHeaders(FILE* connection, bool noBody, size_t* contentLength, enum BodyType
 		int ws;
 		do {
 			ws = fgetc(connection);
-		} while (ws != EOF && isws(ws));
+		} while (ws != EOF && isws((char)ws));
 		if (ws == EOF) {
 			free(headerName);
 			return -1;
@@ -188,7 +214,7 @@ parseHeaders(FILE* connection, bool noBody, size_t* contentLength, enum BodyType
 			return -1;
 		}
 		// remove whitespace between end of value and \r\n
-		headerValueLen = strlen(headerValue)-1;
+		headerValueLen = strlen(headerValue)-1 - 1;
 		while (isws(headerValue[headerValueLen])) {
 			--headerValueLen;
 		}
@@ -204,28 +230,32 @@ parseHeaders(FILE* connection, bool noBody, size_t* contentLength, enum BodyType
 
 		if (!strcmp(headerName, "Content-Length")) {
 			*contentLength = strtozu(headerValue);
+			free(headerValue);
 			if (*contentLength == SIZE_MAX) {
 				errorSend(connection, (struct Response){.code = 400, .body = {SIZE_MAX, Body_Plain, (unsigned char*)"Bad request."}, .info = "Bad request at line " STRINGIFY(__LINE__)}, noBody, *acceptsGzip);
-				free(headerValue);
 				free(headerName);
 				return -1;
 			}
-		}
-		if (!strcmp(headerName, "Content-Type")) {
+		} else if (!strcmp(headerName, "Content-Type")) {
 			for (size_t i = 0; i < sizeof(mimeTable)/sizeof(char const*); ++i) {
 				if (!strcmp(headerValue, mimeTable[i])) {
 					*contentType = (enum BodyType)i;
 					break;
 				}
 			}
-		}
-		if (!strcmp(headerName, "Accept-Encoding")) {
+			free(headerValue);
+		} else if (!strcmp(headerName, "Accept-Encoding")) {
 			if (strstr(headerValue, "gzip") != NULL) {
 				*acceptsGzip = true;
 			}
+			free(headerValue);
+		} else if (!strcmp(headerName, "Host")) {
+			free(*host);
+			*host = headerValue;
+		} else {
+			free(headerValue);
 		}
 
-		free(headerValue);
 		free(headerName);
 	}
 	if (fgetc(connection) != '\n') {
@@ -235,7 +265,7 @@ parseHeaders(FILE* connection, bool noBody, size_t* contentLength, enum BodyType
 	return 0;
 }
 
-int
+static int
 parseBody(FILE* connection, bool noBody, bool acceptsGzip, size_t len, unsigned char** body)
 {
 	*body = NULL;
@@ -268,21 +298,24 @@ parseRequest(FILE* connection, struct sockaddr_in6 address, struct Request* requ
 		return -1;
 	}
 
-	if (parsePath(connection, *noBody, &request->path) < 0) {
+	if (parsePath(connection, *noBody, &request->path, &request->host) < 0) {
 		return -1;
 	}
 
 	if (parseVersion(connection, *noBody) < 0) {
+		free(request->host);
 		free(request->path);
 		return -1;
 	}
 
-	if (parseHeaders(connection, *noBody, &request->body.len, &request->body.type, acceptsGzip) < 0) {
+	if (parseHeaders(connection, *noBody, &request->body.len, &request->body.type, &request->host, acceptsGzip) < 0) {
+		free(request->host);
 		free(request->path);
 		return -1;
 	}
 	
 	if (parseBody(connection, *noBody, *acceptsGzip, request->body.len, &request->body.data) < 0) {
+		free(request->host);
 		free(request->path);
 		return -1;
 	}
@@ -293,6 +326,7 @@ parseRequest(FILE* connection, struct sockaddr_in6 address, struct Request* requ
 void
 freeRequest(struct Request request)
 {
+	free(request.host);
 	free(request.path);
 	free(request.body.data);
 }

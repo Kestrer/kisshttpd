@@ -62,14 +62,12 @@ A few things to note:
 - This library automatically compresses files with gzip if it can.
 - Once you have started the server, you cannot change where userdata points to. If you want to do that, have userdata point to a pointer, which you can change.
 - This library deliberately prevents you from not sending a response or sending an invalid response to a client, for obvious reasons.
-- If the client is using IPv4 then the library will not give the real IPv4 address. This is due to how `inet_ntop` handles IPv4-mapped-IPv6 addresses, and it cannot be changed.
 - The way this library works is that it makes a master thread that continually checks the opened port for incoming connections. When it receives one, it creates a thread that parses the request and calls `callback`. Then that thread forms an HTTP request and sends it back to the client.
 
 Server logging, HTTP request parsing, HTTP response generating, and thread managing are all done by the library.
 
 ## Todo list
 
-- Better managing of Host header
 - Common headers in `struct Request`
 - More compression formats other than gzip
 - Ability to redirect server log to a file

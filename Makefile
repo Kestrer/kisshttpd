@@ -1,26 +1,17 @@
-# c.mk 1.0
+# c.mk 2.0.0
 
-CC::=clang
-CFLAGS::=-Wall -Wextra -pedantic -Werror -g -Og
-LIBS::=-pthread -lz
-LDFLAGS::=-rdynamic -Wl,-rpath=/usr/local/lib -L/usr/local/lib
+include config.mk
 
-PREFIX::=/usr/local
-
-SRCEXT::=c
-OBJEXT::=o
-DEPEXT::=dep
-
-HASMAINREGEX::='int\s+main\s*\('
-NOMAIN::=${shell pcre2grep -Mr $(HASMAINREGEX) . >/dev/null 2>&1; echo $$?}
+NOMAIN::=${shell pcre2grep -Mr 'int\s+main\s*\(' . >/dev/null 2>&1; echo $$?}
 
 DEPDIR::=deps
 OBJDIR::=objects
 
-SOURCES::=$(shell find . -name '*.$(SRCEXT)' -printf '%f\n')
+CSOURCES::=$(shell find . -name '*.c')
+CXXSOURCES::=$(shell find . -name '*.cpp')
 ifeq ($(NOMAIN), 1)
 PICDIR::=picobjects
-BASENAME::=$(shell basename $$(pwd))
+BASENAME::=$(notdir $(CURDIR))
 TARGET::=lib$(BASENAME).a
 SOTARGET::=lib$(BASENAME).so
 PREFIXTARGET::=$(PREFIX)/lib/$(TARGET)
@@ -29,8 +20,12 @@ ifneq ("$(wildcard $(BASENAME).h)","")
 INCLUDE::=$(BASENAME).h
 PREFIXINCLUDE::=$(PREFIX)/include/$(INCLUDE)
 endif
+ifneq ("$(wildcard $(BASENAME).hpp)","")
+INCLUDE::=$(BASENAME).hpp
+PREFIXINCLUDE::=$(PREFIX)/include/$(INCLUDE)
+endif
 else
-TARGET::=$(shell basename $$(pwd))
+TARGET::=$(notdir $(CURDIR))
 PREFIXTARGET::=$(PREFIX)/bin/$(TARGET)
 endif
 
@@ -51,29 +46,42 @@ endif
 uninstall:
 	rm $(PREFIXTARGET) $(or $(PREFIXSOTARGET)) $(or $(PREFIXINCLUDE))
 
-$(SOURCES:%.$(SRCEXT)=$(DEPDIR)/%.$(DEPEXT)): $(DEPDIR)/%.$(DEPEXT): %.$(SRCEXT)
-	@mkdir -p $(DEPDIR)
+$(CSOURCES:%.c=$(DEPDIR)/%.dep): $(DEPDIR)/%.dep: %.c
+	@mkdir -p $(@D)
 	echo "$(OBJDIR)/$$($(CC) -M $< $(CFLAGS))" | perl -pe 's/([^ ]+) *:/$$1 $(subst /,\/,$@):/' > $@
 
-include $(SOURCES:%.$(SRCEXT)=$(DEPDIR)/%.$(DEPEXT))
+$(CXXSOURCES:%.cpp=$(DEPDIR)/%.dep): $(DEPDIR)/%.dep: %.cpp
+	@mkdir -p $(@D)
+	echo "$(OBJDIR)/$$($(CXX) -M $< $(CFLAGS) $(CXXFLAGS))" | perl -pe 's/([^ ]+) *:/$$1 $(subst /,\/,$@):/' > $@
 
-$(SOURCES:%.$(SRCEXT)=$(OBJDIR)/%.$(OBJEXT)): $(OBJDIR)/%.$(OBJEXT): %.$(SRCEXT) $(DEPDIR)/%.$(DEPEXT)
-	@mkdir -p $(OBJDIR)
-	$(CC) -c $< -o $@ $(CFLAGS)
+include $(CSOURCES:%.c=$(DEPDIR)/%.dep)
+include $(CXXSOURCES:%.cpp=$(DEPDIR)/%.dep)
+
+$(CSOURCES:%.c=$(OBJDIR)/%.o): $(OBJDIR)/%.o: %.c $(DEPDIR)/%.dep
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(CXXSOURCES:%.cpp=$(OBJDIR)/%.o): $(OBJDIR)/%.o: %.cpp $(DEPDIR)/%.dep
+	@mkdir -p $(@D)
+	$(CXX) $(CFLAGS) $(CXXFLAGS) -c -o $@ $< 
 
 ifeq ($(NOMAIN), 1)
-$(SOURCES:%.$(SRCEXT)=$(PICDIR)/%.$(OBJEXT)): $(PICDIR)/%.$(OBJEXT): %.$(SRCEXT) $(DEPDIR)/%.$(DEPEXT)
-	@mkdir -p $(PICDIR)
-	$(CC) -c $< -o $@ $(CFLAGS) -fPIC
+$(CSOURCES:%.c=$(PICDIR)/%.o): $(PICDIR)/%.o: %.c $(DEPDIR)/%.dep
+	@mkdir -p $(@D)
+	$(CC) -fPIC $(CFLAGS) -c -o $@ $<
 
-$(TARGET): $(SOURCES:%.$(SRCEXT)=$(OBJDIR)/%.$(OBJEXT))
+$(CXXSOURCES:%.cpp=$(PICDIR)/%.o): $(PICDIR)/%.o: %.cpp $(DEPDIR)/%.dep
+	@mkdir -p $(@D)
+	$(CXX) -fPIC $(CFLAGS) $(CXXFLAGS) -c -o $@ $<
+
+$(TARGET): $(CSOURCES:%.c=$(OBJDIR)/%.o) $(CXXSOURCES:%.cpp=$(OBJDIR)/%.o)
 	ar rcs $@ $^
 
-$(SOTARGET): $(SOURCES:%.$(SRCEXT)=$(PICDIR)/%.$(OBJEXT))
-	$(CC) -o $@ $^ $(LDFLAGS) $(LIBS) -shared
+$(SOTARGET): $(CSOURCES:%.c=$(PICDIR)/%.o) $(CXXSOURCES:%.cpp=$(PICDIR)/%.o)
+	$(CXX) -o $@ $^ $(LDFLAGS) $(LIBS) -shared
 else
-$(TARGET): $(SOURCES:%.$(SRCEXT)=$(OBJDIR)/%.$(OBJEXT))
-	$(CC) -o $@ $^ $(LDFLAGS) $(LIBS)
+$(TARGET): $(CSOURCES:%.c=$(OBJDIR)/%.o) $(CXXSOURCES:%.cpp=$(OBJDIR)/%.o)
+	$(CXX) -o $@ $^ $(LDFLAGS) $(LIBS)
 endif
 
 .PHONY: all clean install uninstall
