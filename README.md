@@ -68,6 +68,7 @@ Server logging, HTTP request parsing, HTTP response generating, and thread manag
 
 ## Todo list
 
+- SIGPIPE
 - Common headers in `struct Request`
 - More compression formats other than gzip
 - Ability to redirect server log to a file

@@ -1,16 +1,17 @@
-# c.mk 2.0.0
+# c.mk 2.1.0
 
 include config.mk
 
 NOMAIN::=${shell pcre2grep -Mr 'int\s+main\s*\(' . >/dev/null 2>&1; echo $$?}
 
-DEPDIR::=deps
-OBJDIR::=objects
+BUILDDIR=build
+DEPDIR::=$(BUILDDIR)/deps
+OBJDIR::=$(BUILDDIR)/objects
 
 CSOURCES::=$(shell find . -name '*.c')
 CXXSOURCES::=$(shell find . -name '*.cpp')
 ifeq ($(NOMAIN), 1)
-PICDIR::=picobjects
+PICDIR::=$(BUILDDIR)/pic
 BASENAME::=$(notdir $(CURDIR))
 TARGET::=lib$(BASENAME).a
 SOTARGET::=lib$(BASENAME).so
@@ -32,7 +33,7 @@ endif
 all: $(TARGET) $(or $(SOTARGET))
 
 clean:
-	rm -r $(TARGET) $(or $(SOTARGET)) $(OBJDIR) $(DEPDIR) $(or $(PICDIR))
+	rm -r $(TARGET) $(or $(SOTARGET)) $(OBJDIR) $(DEPDIR) $(or $(PICDIR)) $(BUILDDIR)
 
 install: all
 	install -CD $(TARGET) $(PREFIXTARGET)

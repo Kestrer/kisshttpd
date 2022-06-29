@@ -6,15 +6,50 @@
 #include <stdlib.h>
 #include <string.h>
 
+static uv_buf_t
+vbufprintf(char const* fmt, va_list args)
+{
+	int const size = vsnprintf(NULL, 0, fmt, args);
+	if (size < 0) return {.base = NULL, .len = 0};
+
+	uv_buf_t buf;
+	buf.len = size;
+	buf.base = malloc(buf.len);
+	if (!buf.base) return {.base = NULL, .len = 0};
+
+	if (vsprintf(buf.base, fmt, args) < 0) {
+		free(buf.base);
+		return {.base = NULL, .len = 0};
+	}
+	return buf;
+}
+
+static uv_buf_t
+bufprintf(char const* fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+	uv_buf_t const ret = vbufprintf(fmt, args);
+	va_end(args);
+	return ret;
+}
+
 void
 sendResponse(FILE* connection, struct Response response, bool const noBody, bool const acceptsGzip)
 {
-	fprintf(connection, "HTTP/1.1 ");
+	uv_buf_t bufs[10];
+	size_t nbufs = 0;
 
-	fprintf(connection, "%i \r\n", response.code);
+	bufs[nbufs++] = bufprintf("HTTP/1.1 %i \r\n", response.code);
+	if (!bufs[nbufs].base) return;
 
 	if (response.uri != NULL) {
-		fprintf(connection, "Location: %s\r\n", response.uri);
+		++nbufs;
+		bufs[nbufs++] = bufprintf("Location: %s\r\n", response.uri);
+		if (!bufs[nbufs].base) {
+			for (size_t i = 0; i < nbufs; ++i) free(bufs[i].base);
+			return;
+		}
 	}
 
 	if (response.body.len == SIZE_MAX) {
@@ -30,7 +65,13 @@ sendResponse(FILE* connection, struct Response response, bool const noBody, bool
 				gzipped = true;
 				response.body.data = gzData;
 				response.body.len = gzLen;
-				fprintf(connection, "Content-Encoding: gzip\r\nVary: Accept-Encoding\r\n");
+
+				bufs[nbufs++] = bufprintf("Content-Encoding: gzip\r\nVary: Accept-Encoding\r\n");
+				if (!bufs[nbufs].base) {
+					free(gzData);
+					for (size_t i = 0; i < nbufs; ++i) free(bufs[i].base);
+					return;
+				}
 			} else {
 				free(gzData);
 			}
@@ -38,11 +79,26 @@ sendResponse(FILE* connection, struct Response response, bool const noBody, bool
 	}
 
 	if (response.body.len) {
-		fprintf(connection, "Content-Length: %zu\r\n", response.body.len);
-		if (response.body.type != Body_Unknown) {
-			fprintf(connection, "Content-Type: %s; charset=utf-8\r\n", mimeTable[response.body.type]);
+		bufs[nbufs++] = bufprintf("Content-Length: %zu\r\n", response.body.len);
+		if (!bufs[nbufs].base) {
+			if (gzipped) free((unsigned char*)response.body.data);
+			for (size_t i = 0; i < nbufs; ++i) free(bufs[i].base);
+			return;
 		}
-		fprintf(connection, "\r\n");
+		if (response.body.type != Body_Unknown) {
+			bufs[nbufs++] = bufprintf("Content-Type: %s; charset=utf-8\r\n", mimeTable[response.body.type]);
+			if (!bufs[nbufs].base) {
+				if (gzipped) free((unsigned char*)response.body.data);
+				for (size_t i = 0; i < nbufs; ++i) free(bufs[i].base);
+				return;
+			}
+		}
+		bufs[nbufs++] = bufprintf("\r\n");
+		if (!bufs[nbufs].base) {
+			if (gzipped) free((unsigned char*)response.body.data);
+			for (size_t i = 0; i < nbufs; ++i) free(bufs[i].base);
+			return;
+		}
 		if (!noBody) {
 			fwrite(response.body.data, 1, response.body.len, connection);
 		}

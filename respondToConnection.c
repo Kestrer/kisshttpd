@@ -6,6 +6,24 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+static void
+httpLog(struct Request request, struct Response response)
+{
+	startServerLog();
+	printf("[%s][\"%s %s%s", request.sender, methodTable[request.method], request.host, request.path);
+	printf("\"->%d %s ", response.code, mimeTable[response.body.type]);
+	if (response.body.len != SIZE_MAX) {
+		printf("<%zuB>", response.body.len);
+	} else {
+		printf("\"%s\"", response.body.data);
+	}
+	putc(']', stdout);
+	if (response.info) {
+		printf(": %s", response.info);
+	}
+	putc('\n', stdout);
+}
+
 int
 respondToConnection(struct Connection* connection)
 {

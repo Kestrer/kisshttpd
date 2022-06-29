@@ -18,41 +18,13 @@ isws(char const c)
 	return c == ' ' || c == '\t';
 }
 
-#define MAXTIME sizeof("2038-01-19T03:14:07Z")
-static inline void
-getIsoTime(char* const timeStr)
-{
-	time_t const now = time(NULL);
-	strftime(timeStr, MAXTIME, "%Y-%m-%dT%H:%M:%SZ", gmtime(&now));
-}
-
-void
-serverLog(struct Request request, struct Response response)
-{
-	char isoTime[MAXTIME];
-	getIsoTime(isoTime);
-
-	printf("[%s][%s][\"%s %s%s", isoTime, request.sender, methodTable[request.method], request.host, request.path);
-	printf("\"->%d %s ", response.code, mimeTable[response.body.type]);
-	if (response.body.len != SIZE_MAX)
-		printf("<%zuB>", response.body.len);
-	else
-		printf("\"%s\"", response.body.data);
-	putc(']', stdout);
-	if (response.info)
-		printf(": %s", response.info);
-	putc('\n', stdout);
-}
-
 static void
 errorSend(FILE* connection, struct Response response, bool const noBody, bool const acceptsGzip)
 {
 	sendResponse(connection, response, noBody, acceptsGzip);
 
-	char isoTime[MAXTIME];
-	getIsoTime(isoTime);
-
-	printf("[%s][ERROR DUMP]: %s\n", isoTime, response.info ? response.info : (char*)response.body.data);
+	startServerLog();
+	printf("[ERROR DUMP]: %s\n", response.info ? response.info : (char*)response.body.data);
 }
 
 static size_t
@@ -69,264 +41,241 @@ strtozu(char const* str)
 	return val;
 }
 
-static int
-parseMethod(FILE* connection, enum Method* method, bool* noBody)
+static enum ParseError
+parseMethod(struct DynamicString methodStr, enum Method* method, bool* noBody)
 {
-	char methodStr[sizeof("OPTIONS")];
-	size_t i = 0;
-	for (int c; i < sizeof(methodStr)-1 && (c = fgetc(connection)) != ' '; ++i) {
-		if (c == EOF) return -1;
-		methodStr[i] = (char)c;
-	}
-	if (i == sizeof(methodStr)-1) return -1;
-
-	methodStr[i] = '\0';
-	*noBody = false;
-	if (!strcmp(methodStr, "GET")) {
+	if (!strcmp(methodStr.data, "GET")) {
 		*method = HTTP_GET;
-	} else if (!strcmp(methodStr, "HEAD")) {
+	} else if (!strcmp(methodStr.data, "HEAD")) {
 		*method = HTTP_GET;
 		*noBody = true;
-	} else if (!strcmp(methodStr, "POST")) {
+	} else if (!strcmp(methodStr.data, "POST")) {
 		*method = HTTP_POST;
-	} else if (!strcmp(methodStr, "PUT")) {
+	} else if (!strcmp(methodStr.data, "PUT")) {
 		*method = HTTP_PUT;
-	} else if (!strcmp(methodStr, "DELETE")) {
+	} else if (!strcmp(methodStr.data, "DELETE")) {
 		*method = HTTP_DELETE;
 	} else {
-		errorSend(connection, (struct Response){.code = 501, .body = {SIZE_MAX, Body_Plain, (unsigned char*)"Unknown HTTP method."}}, false, false);
-		return -1;
+		free(methodStr.data);
+		return ParseError_UnknownMethod;
 	}
-	return 0;
+
+	free(methodStr.data);
+	return ParseError_Success;
 }
 
-static int
-parsePath(FILE* connection, bool noBody, char** path, char** host)
+static enum ParseError
+parsePath(struct DynamicString pathStr, char** path, char** host)
 {
-	*path = NULL;
-	*host = NULL;
-	size_t pathLen;
-	if (getdelim(path, &pathLen, ' ', connection) < 0) {
-		free(*path);
-		if (!feof(connection)) {
-			errorSend(connection, (struct Response){.code = 500, .body = {SIZE_MAX, Body_Plain, (unsigned char*)"Internal server error."}, .info = "stream error while parsing path"}, noBody, false);
-		}
-		return -1;
-	}
-	pathLen = strlen(*path)-1;
-	(*path)[pathLen] = '\0';
-
-	if ((*path)[0] != '/') {
+	if (pathStr[0] != '/') {
 		// deal with absolute-form in request-target
 		// see RFC 7230 section 5.3.2
-		for (size_t i = 0; (*path)[i] && (*path)[i] != ':'; ++i) {
-			(*path)[i] = (char)tolower((*path)[i]);
+		for (size_t i = 0; i < pathStr.len && pathStr.data[i] != ':'; ++i) {
+			pathStr.data[i] = (char)tolower(pathStr.data[i]);
 		}
-		if (strncmp(*path, "http://", 7)) {
-			errorSend(connection, (struct Response){.code = 400, .body = {SIZE_MAX, Body_Plain, (unsigned char*)"Bad request."}, .info = "Bad request at line " STRINGIFY(__LINE__)}, noBody, false);
-			free(*path);
-			return -1;
+		if (strncmp(pathStr.data, "http://", 7)) {
+			free(pathStr.data);
+			return ParseError_BadRequest;
 		}
-		char const* const hostEnd = strchr(*path + 7, '/');
-		size_t const hostLen = hostEnd != NULL ? (size_t)(hostEnd - *path) : strlen(*path);
+		char const* const hostEnd = strchr(pathStr.data + 7, '/');
+		size_t const hostLen = hostEnd != NULL ? (size_t)(hostEnd - *path) : pathStr.len;
 
 		*host = malloc(hostLen + 1);
 		if (*host == NULL) {
-			free(*path);
-			return -1;
+			free(pathStr.data);
+			return ParseError_NoMem;
 		}
-		memcpy(*host, *path, hostLen);
-		*host[hostLen] = '\0';
-		memmove(*path, *path + hostLen, strlen(*path + hostLen) + 1);
+		memcpy(*host, pathStr.data, hostLen);
+		(*host)[hostLen] = '\0';
+		memmove(pathStr.data, pathStr.data + hostLen, pathStr.len - hostLen + 1);
 		if (hostEnd == NULL) {
-			(*path)[0] = '/';
-			(*path)[1] = '\0';
+			pathStr.data[0] = '/';
+			pathStr.data[1] = '\0';
 		}
 	}
-	return 0;
+	*path = pathStr.data;
+	return ParseError_Success;
 }
 
 static int
-parseVersion(FILE* connection, bool noBody)
+parseVersion(struct DynamicString versionStr)
 {
-	char const httpVersion[] = "HTTP/1.1\r\n";
-	char buffer[sizeof(httpVersion)-1];
-	if (fread(buffer, 1, sizeof(httpVersion)-1, connection) != sizeof(httpVersion)-1) {
-		if (!feof(connection)) {
-			errorSend(connection, (struct Response){.code = 500, .body = {SIZE_MAX, Body_Plain, (unsigned char*)"Internal server error."}, .info = "stream error while parsing HTTP version"}, noBody, false);
-		}
-		return -1;
+	char const httpVersion[] = "HTTP/1.1\r";
+	if (strcmp(httpVersion, versionStr.data)) {
+		free(versionStr.data);
+		return ParseError_InvalidVersion;
 	}
-	if (memcmp(httpVersion, buffer, sizeof(httpVersion)-1)) {
-		errorSend(connection, (struct Response){.code = 505, .body = {SIZE_MAX, Body_Plain, (unsigned char*)"This server only supports HTTP/1.1."}}, noBody, false);
-		return -1;
-	}
-	return 0;
+	free(versionStr.data);
+	return ParseError_Success;
 }
 
 static int
-parseHeaders(FILE* connection, bool noBody, size_t* contentLength, enum BodyType* contentType, char** host, bool* acceptsGzip)
+parseHeader(struct DynamicString headerName, struct DynamicString headerValue, size_t* contentLength, enum BodyType* contentType, char** host, bool* acceptsGzip)
 {
-	*contentLength = 0;
-	*contentType = Body_Unknown;
-	*acceptsGzip = false;
-	for (;;) {
-		int const headersEnd = fgetc(connection);
-		if (headersEnd == EOF) {
-			return -1;
-		}
-		if (headersEnd == '\r') {
-			break;
-		}
-		ungetc(headersEnd, connection);
+	// remove whitespace at end of value
+	while (isws(headerValue.data[headerValue.len-1])) --headerValue.len;
+	headerValue.data[headerValue.len] = '\0';
 
-		char* headerName = NULL;
-		size_t headerNameLen;
-		if (getdelim(&headerName, &headerNameLen, ':', connection) < 0) {
-			if (!feof(connection)) {
-				errorSend(connection, (struct Response){.code = 500, .body = {SIZE_MAX, Body_Plain, (unsigned char*)"Internal server error."}, .info = "stream error while getting header name"}, noBody, *acceptsGzip);
+	// remove whitespace at start of value
+	size_t firstChar = 0;
+	while (isws(headerValue.data[firstChar])) ++firstChar;
+	memmove(headerValue.data, headerValue.data + firstChar, headerValue.len - firstChar + 1);
+
+	if (!strcmp(headerName.data, "Content-Length")) {
+		*contentLength = strtozu(headerValue.data);
+		free(headerValue.data);
+		if (*contentLength == SIZE_MAX) {
+			free(headerName.data);
+			return ParseError_BadRequest;
+		}
+	} else if (!strcmp(headerName.data, "Content-Type")) {
+		for (size_t i = 0; i < sizeof(mimeTable)/sizeof(char const*); ++i) {
+			if (!strcmp(headerValue.data, mimeTable[i])) {
+				*contentType = (enum BodyType)i;
+				break;
 			}
-			free(headerName);
-			return -1;
 		}
-		headerNameLen = strlen(headerName)-1;
-		headerName[headerNameLen] = '\0';
-
-		// consume whitespace between colon and value
-		int ws;
-		do {
-			ws = fgetc(connection);
-		} while (ws != EOF && isws((char)ws));
-		if (ws == EOF) {
-			free(headerName);
-			return -1;
-		}
-		ungetc(ws, connection);
-
-		char* headerValue = NULL;
-		size_t headerValueLen;
-		if (getdelim(&headerValue, &headerValueLen, '\r', connection) < 0) {
-			if (!feof(connection)) {
-				errorSend(connection, (struct Response){.code = 500, .body = {SIZE_MAX, Body_Plain, (unsigned char*)"Internal server error."}, .info = "stream error while getting header value"}, noBody, *acceptsGzip);
-			}
-			free(headerValue);
-			free(headerName);
-			return -1;
-		}
-		// remove whitespace between end of value and \r\n
-		headerValueLen = strlen(headerValue)-1 - 1;
-		while (isws(headerValue[headerValueLen])) {
-			--headerValueLen;
-		}
-		++headerValueLen;
-		headerValue[headerValueLen] = '\0';
-
-		if (fgetc(connection) != '\n') {
-			errorSend(connection, (struct Response){.code = 400, .body = {SIZE_MAX, Body_Plain, (unsigned char*)"Bad request."}, .info = "Bad request at line " STRINGIFY(__LINE__)}, noBody, *acceptsGzip);
-			free(headerValue);
-			free(headerName);
-			return -1;
-		}
-
-		if (!strcmp(headerName, "Content-Length")) {
-			*contentLength = strtozu(headerValue);
-			free(headerValue);
-			if (*contentLength == SIZE_MAX) {
-				errorSend(connection, (struct Response){.code = 400, .body = {SIZE_MAX, Body_Plain, (unsigned char*)"Bad request."}, .info = "Bad request at line " STRINGIFY(__LINE__)}, noBody, *acceptsGzip);
-				free(headerName);
-				return -1;
-			}
-		} else if (!strcmp(headerName, "Content-Type")) {
-			for (size_t i = 0; i < sizeof(mimeTable)/sizeof(char const*); ++i) {
-				if (!strcmp(headerValue, mimeTable[i])) {
-					*contentType = (enum BodyType)i;
-					break;
-				}
-			}
-			free(headerValue);
-		} else if (!strcmp(headerName, "Accept-Encoding")) {
-			if (strstr(headerValue, "gzip") != NULL) {
-				*acceptsGzip = true;
-			}
-			free(headerValue);
-		} else if (!strcmp(headerName, "Host")) {
-			free(*host);
-			*host = headerValue;
-		} else {
-			free(headerValue);
-		}
-
-		free(headerName);
+		free(headerValue.data);
+	} else if (!strcmp(headerName.data, "Accept-Encoding")) {
+		if (strstr(headerValue.data, "gzip")) *acceptsGzip = true;
+		free(headerValue.data);
+	} else if (!strcmp(headerName, "Host")) {
+		free(*host);
+		*host = headerValue.data;
+	} else {
+		free(headerValue.data);
 	}
-	if (fgetc(connection) != '\n') {
-		errorSend(connection, (struct Response){.code = 400, .body = {SIZE_MAX, Body_Plain, (unsigned char*)"Bad request."}, .info = "Bad request at line " STRINGIFY(__LINE__)}, noBody, *acceptsGzip);
-		return -1;
-	}
-	return 0;
+
+	free(headerName.data);
+	return ParseError_Success;
 }
 
-static int
-parseBody(FILE* connection, bool noBody, bool acceptsGzip, size_t len, unsigned char** body)
+static void
+dynamicStringAddc(struct DynamicString str, char c)
 {
-	*body = NULL;
-	if (!len) {
-		return 0;
-	}
-
-	*body = malloc(len + 1);
-	if (*body == NULL) {
-		errorSend(connection, (struct Response){.code = 500, .body = {SIZE_MAX, Body_Plain, (unsigned char*)"Internal server error."}, "malloc failed while getting body"}, noBody, acceptsGzip);
-		return -1;
-	}
-	if (fread(*body, 1, len, connection) != len)  {
-		if (!feof(connection)) {
-			errorSend(connection, (struct Response){.code = 500, .body = {SIZE_MAX, Body_Plain, (unsigned char*)"Internal server error."}, "stream error while getting body"}, noBody, acceptsGzip);
+	while (str.len+1 >= str.mem) {
+		str.mem += 256;
+		char* const newData = realloc(str.data, str.mem);
+		if (newData == NULL) {
+			free(str.data);
+			str.data = NULL;
+			str.len = 0;
+			str.mem = 0;
+			return;
 		}
-		free(*body);
-		return -1;
+		str.data = newData;
 	}
-	(*body)[len] = '\0';
-	return 0;
-}
-
-int
-parseRequest(FILE* connection, struct sockaddr_in6 address, struct Request* request, bool* noBody, bool* acceptsGzip)
-{
-	inet_ntop(AF_INET6, &address.sin6_addr, request->sender, sizeof(request->sender));
-
-	if (parseMethod(connection, &request->method, noBody) < 0) {
-		return -1;
-	}
-
-	if (parsePath(connection, *noBody, &request->path, &request->host) < 0) {
-		return -1;
-	}
-
-	if (parseVersion(connection, *noBody) < 0) {
-		free(request->host);
-		free(request->path);
-		return -1;
-	}
-
-	if (parseHeaders(connection, *noBody, &request->body.len, &request->body.type, &request->host, acceptsGzip) < 0) {
-		free(request->host);
-		free(request->path);
-		return -1;
-	}
-	
-	if (parseBody(connection, *noBody, *acceptsGzip, request->body.len, &request->body.data) < 0) {
-		free(request->host);
-		free(request->path);
-		return -1;
-	}
-
-	return 0;
+	str.data[str.len++] = c;
+	str.data[str.len] = '\0';
 }
 
 void
-freeRequest(struct Request request)
+startParse(struct ParseState* state, char const* sender)
 {
-	free(request.host);
-	free(request.path);
-	free(request.body.data);
+	memset(state, 0, sizeof(struct ParseState));
+	strncpy(state->request.public.sender, sender, sizeof(state->request.public.sender));
+}
+
+enum ParseError
+parseChar(struct ParseState* state, char c)
+{
+	switch (state->stage) {
+	case ParseStage_Method:
+		if (c == ' ') {
+			enum ParseError const r = parseMethod(state->method, &state->request.public.method, &state->request.noBody);
+			++state->stage;
+			state->path = {NULL, 0, 0};
+			return r;
+		}
+		dynamicStringAddc(state->method, c);
+		if (state->method.data == NULL) return ParseError_NoMem;
+		break;
+	case ParseStage_Path:
+		if (c == ' ') {
+			enum ParseError const r = parsePath(state->path, &state->request.public.path, &state->request.public.host);
+			++state->stage;
+			state->version = {NULL, 0, 0};
+			return r;
+		}
+		dynamicStringAddc(state->path, c);
+		if (state->method.data == NULL) {
+			free(state->request.public.host);
+			free(state->request.public.path);
+			return ParseError_NoMem;
+		}
+		break;
+	case ParseStage_Version:
+		if (c == '\n') {
+			enum ParseError const r = parseVersion(state->version);
+			++state->stage;
+			state->headerName = {NULL, 0, 0};
+			state->headerValue = {NULL, 0, 0};
+			return r;
+		}
+		dynamicStringAddc(state->version, c);
+		if (state->version.data == NULL) {
+			free(state->request.public.host);
+			free(state->request.public.path);
+			return ParseError_NoMem;
+		}
+		break;
+	case ParseStage_HeaderName:
+		if (c == '\r' && !state->headerName.data) break;
+		if (c == '\n' && !state->headerName.data) {
+			stage->stage = ParseStage_Body;
+			if (!state->request.public.body.len) return ParseError_Complete;
+			state->request.public.body.data = malloc(state->request.public.body.len+1);
+			if (state->request.public.body.data == NULL) {
+				free(state->request.public.host);
+				free(state->request.public.path);
+				return ParseError_NoMem;
+			}
+			state->bodyLen = 0;
+			break;
+		}
+		if (c == ':') {
+			++state->stage;
+			break;
+		}
+		dynamicStringAddc(state->headerName, c);
+		if (state->headerName.data == NULL) {
+			free(state->request.public.host);
+			free(state->request.public.path);
+			return ParseError_NoMem;
+		}
+		break;
+	case ParseStage_HeaderValue:
+		if (c == '\r') break;
+		if (c == '\n') {
+			enum ParseError const r = parseHeader(state->headerName, state->headerValue, &state->request.public.body.len, &state->request.public.body.type, &state->request.public.host, &state->request.acceptsGzip);
+			--state->stage;
+			state->headerName = {NULL, 0, 0};
+			state->headerValue = {NULL, 0, 0};
+			return r;
+		}
+		dynamicStringAddc(state->headerValue, c);
+		if (state->headerValue.data == NULL) {
+			free(state->headerName.data);
+			free(state->request.public.host);
+			free(state->request.public.path);
+			return ParseError_NoMem;
+		}
+		break;
+	case ParseStage_Body:
+		state->request.public.body.data[state->bodyLen++] = c;
+		if (state->bodyLen == state->request.public.body.len) {
+			state->request.public.body.data[state->bodyLen] = '\0';
+			return ParseError_Complete;
+		}
+		break;
+	}
+	return ParseError_Success;
+}
+
+void
+freeServerRequest(struct ServerRequest request)
+{
+	free(request.public.host);
+	free(request.public.path);
+	free(request.public.body.data);
 }
